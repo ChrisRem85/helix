@@ -1,0 +1,12 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^cd \"c:\\\\Users\\\\cr528\\\\Documents\\\\VSCode\\\\GitHub\\\\helix\\\\helix\\\\interface\"; python app\\.py$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^cd \"c:\\\\Users\\\\cr528\\\\Documents\\\\VSCode\\\\GitHub\\\\helix\\\\helix\\\\interface\"; c:/Users/cr528/Documents/VSCode/GitHub/helix/helix/\\.venv/Scripts/python\\.exe app\\.py$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}
