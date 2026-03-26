@@ -218,10 +218,27 @@ with gr.Blocks(js=PAGE_JS) as demo:
     gr.Markdown("## Time Series Order")
     dynamic_area = gr.HTML()
     file_order = gr.Textbox(visible=False, elem_id="file_order")
-    gr.Markdown("## Results")
-    output = gr.Textbox(lines=10)
     btn = gr.Button("Run Analysis")
-    file_input.change(fn=generate_time_inputs, inputs=file_input, outputs=[dynamic_area, upload_message, file_order])
-    btn.click(fn=process, inputs=[file_input, file_order], outputs=output)
+    
+    gr.Markdown("## Results")
+    gr.Markdown("### Detected Lesions Over Time")
+    detected_lesions_figure = gr.Image(type="filepath", label="Detected Lesions Over Time")
+
+    gr.Markdown("### Number of Lesions Over Time")
+    number_of_lesions_figure = gr.Image(type="filepath", label="Number of Lesions Over Time")
+
+    
+
+    file_input.change(
+        fn=generate_time_inputs,
+        inputs=file_input,
+        outputs=[dynamic_area, upload_message, file_order],
+    )
+
+    btn.click(
+        fn=process,
+        inputs=[file_input, file_order],
+        outputs=[detected_lesions_figure, number_of_lesions_figure],
+    )
 
 demo.launch()
