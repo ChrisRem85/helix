@@ -2,3 +2,6 @@
 *.DS_Store
 *.swp
 /SkinStagerData/
+*.jpg
+*.png
+*.jpeg
