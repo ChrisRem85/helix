@@ -3,4 +3,3 @@ torch>=1.1.0
 opencv-python-headless==4.5.5.64
 numpy>=1.18.1
 segmentation_models_pytorch
-monai
