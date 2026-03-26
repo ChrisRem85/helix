@@ -68,13 +68,13 @@ if __name__ == '__main__':
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
     parser.add_argument(
-        '--input_pairs', type=str, default='assets/scannet_sample_pairs_with_gt.txt',
+        '--input_pairs', type=str, default='SkinStagerData/MM3/match.txt',
         help='Path to the list of image pairs')
     parser.add_argument(
-        '--input_dir', type=str, default='assets/scannet_sample_images/',
+        '--input_dir', type=str, default='SkinStagerData/MM3/',
         help='Path to the directory that contains the images')
     parser.add_argument(
-        '--output_dir', type=str, default='dump_match_pairs/',
+        '--output_dir', type=str, default='SkinStagerData/MM3/dump_match_pairs/',
         help='Path to the directory in which the .npz results and optionally,'
              'the visualization images are written')
 
@@ -82,7 +82,7 @@ if __name__ == '__main__':
         '--max_length', type=int, default=-1,
         help='Maximum number of pairs to evaluate')
     parser.add_argument(
-        '--resize', type=int, nargs='+', default=[640, 480],
+        '--resize', type=int, nargs='+', default=[-1,-1],#[640, 480],
         help='Resize the input image before running inference. If two numbers, '
              'resize to the exact dimensions, if one number, resize the max '
              'dimension, if -1, do not resize')
@@ -98,7 +98,7 @@ if __name__ == '__main__':
         help='Maximum number of keypoints detected by Superpoint'
              ' (\'-1\' keeps all keypoints)')
     parser.add_argument(
-        '--keypoint_threshold', type=float, default=0.005,
+        '--keypoint_threshold', type=float, default=0.05,
         help='SuperPoint keypoint detector confidence threshold')
     parser.add_argument(
         '--nms_radius', type=int, default=4,
@@ -112,7 +112,7 @@ if __name__ == '__main__':
         help='SuperGlue match threshold')
 
     parser.add_argument(
-        '--viz', action='store_true',
+        '--viz', action='store_true', default=True,
         help='Visualize the matches and dump the plots')
     parser.add_argument(
         '--eval', action='store_true',

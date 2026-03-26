@@ -1,0 +1,22 @@
+version: "3.8"
+services:
+  superglue:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: superglue:gpu
+    volumes:
+      - ./:/workspace:cached
+    working_dir: /workspace
+    command: python match_pairs.py
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1           # change to 'all' to use all available GPUs
+              capabilities: [gpu]
+    # If your Docker Engine requires the legacy key, uncomment:
+    # runtime: nvidia
