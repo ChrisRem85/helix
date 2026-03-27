@@ -13,7 +13,7 @@ import segmentation_models_pytorch as smp
 import csv
 from segmentation_models_pytorch.encoders import get_preprocessing_fn
 import sys
-
+import albumentations as A
 
 import segmentation_models_pytorch as smp
 from torchvision.models.segmentation import deeplabv3_resnet50
@@ -115,29 +115,18 @@ use_model_with_dict_output = False  # set to False if your model doesn't return 
 """
  # instead of outputs = model(images)
 class SkinDataset(Dataset):
-    def __init__(self, base_dir, image_transform=image_transform_fn, mask_transform=mask_transform):
+    def __init__(self, base_dir, aug=None):
         self.base_dir = base_dir
-        self.image_transform = image_transform
-        self.mask_transform = mask_transform
-
-        # store (image_name, mask_name) pairs
+        self.aug = aug
         self.samples = []
-        skipped = 0
 
-        for f in os.listdir(base_dir):
+        for f in sorted(os.listdir(base_dir)):
             name_low = f.lower()
-
-            # use only base images (not mask files)
-            if not name_low.endswith(".jpg"):
+            if not name_low.endswith(".jpg") or name_low.endswith("_mask.jpg"):
                 continue
-            if name_low.endswith("_mask.jpg"):
-                continue  # skip mask files themselves
 
-            base = f[:-4]  # strip ".jpg"
-            cand_masks = [
-                base + "_segmentation.png",
-                base + "_mask.jpg",
-            ]
+            base = f[:-4]
+            cand_masks = [base + "_segmentation.png", base + "_mask.jpg"]
 
             chosen_mask = None
             for m in cand_masks:
@@ -145,14 +134,8 @@ class SkinDataset(Dataset):
                     chosen_mask = m
                     break
 
-            if chosen_mask is None:
-                skipped += 1
-                print(f"[SKIP] missing mask for {f}, expected one of: {cand_masks}")
-                continue
-
-            self.samples.append((f, chosen_mask))
-
-        print(f"[DATASET] usable samples: {len(self.samples)}, skipped: {skipped}")
+            if chosen_mask is not None:
+                self.samples.append((f, chosen_mask))
 
     def __len__(self):
         return len(self.samples)
@@ -160,32 +143,21 @@ class SkinDataset(Dataset):
     def __getitem__(self, idx):
         img_name, mask_name = self.samples[idx]
 
-        img_path = os.path.join(self.base_dir, img_name)
-        mask_path = os.path.join(self.base_dir, mask_name)
+        image = cv2.imread(os.path.join(self.base_dir, img_name))
+        image = cv2.cvtColor(cv2.resize(image, (256, 256)), cv2.COLOR_BGR2RGB)
 
-        image = cv2.imread(img_path)
-        if image is None:
-            raise FileNotFoundError(f"Image not found or unreadable: {img_path}")
-
-        image = cv2.resize(image, (256, 256))
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-        if mask is None:
-            raise FileNotFoundError(f"Mask not found or unreadable: {mask_path}")
-
+        mask = cv2.imread(os.path.join(self.base_dir, mask_name), cv2.IMREAD_GRAYSCALE)
         mask = cv2.resize(mask, (256, 256))
         mask = (mask > 0).astype(np.float32)
 
-        image = Image.fromarray(image)
-        mask = Image.fromarray(mask)
+        if self.aug is not None:
+            out = self.aug(image=image, mask=mask)
+            image, mask = out["image"], out["mask"]
 
-        if self.image_transform:
-            image = self.image_transform(image)
-        if self.mask_transform:
-            mask = self.mask_transform(mask)
+        image = preprocess_input(image).astype(np.float32)   # HWC
+        image = torch.from_numpy(image).permute(2, 0, 1)     # CHW
+        mask = torch.from_numpy(mask).unsqueeze(0).float()   # 1HW
 
-        # keep returning img_name so your loaders still unpack (images, masks, _)
         return image, mask, img_name
 
 # ==============================
@@ -195,6 +167,22 @@ class SkinDataset(Dataset):
 transform = transforms.Compose([
     transforms.ToTensor()
 ])
+
+train_aug = A.Compose([
+A.Rotate(limit=25, border_mode=cv2.BORDER_CONSTANT, p=0.6),
+A.ShiftScaleRotate(
+shift_limit=0.05,
+scale_limit=0.10,
+rotate_limit=0,
+border_mode=cv2.BORDER_CONSTANT,
+p=0.4,
+),
+A.HorizontalFlip(p=0.5),
+A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.6),
+A.RandomGamma(gamma_limit=(80, 120), p=0.3),
+])
+
+val_aug = A.Compose([])
 
 # ==============================
 # Dataset + Split
@@ -215,6 +203,18 @@ val_size = len(dataset) - train_size
 
 train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
 
+full_for_split = SkinDataset(base_path, aug=None)
+n = len(full_for_split)
+train_size = int(0.8 * n)
+val_size = n - train_size
+
+g = torch.Generator().manual_seed(42)
+perm = torch.randperm(n, generator=g).tolist()
+train_idx = perm[:train_size]
+val_idx = perm[train_size:]
+
+train_dataset = Subset(SkinDataset(base_path, aug=train_aug), train_idx)
+val_dataset = Subset(SkinDataset(base_path, aug=val_aug), val_idx)
 
 
 #################################################
@@ -281,7 +281,23 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model.to(device)
 
 criterion = nn.BCEWithLogitsLoss()
+dice_loss_fn = smp.losses.DiceLoss(mode="binary", from_logits=True)
+bce_loss_fn = nn.BCEWithLogitsLoss()  # or without pos_weight in pretrain
+
+def combined_loss(logits, targets, alpha=0.5):
+    # alpha: weight for BCE term
+    return alpha * bce_loss_fn(logits, targets) + (1.0 - alpha) * dice_loss_fn(logits, targets)
+criterion = combined_loss
+
 optimizer = optim.Adam(model.parameters(), lr=0.0003)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer,
+    mode="min",
+    factor=0.5,
+    patience=2,
+    min_lr=1e-6,
+    verbose=True
+)
 best_val_loss = float("inf")
 # ==============================
 # Training
@@ -342,6 +358,7 @@ for epoch in range(num_epochs):
             val_loss += loss.item()
 
     val_loss_mean = val_loss / len(val_loader)
+    scheduler.step(val_loss_mean)
     print(f"\nEpoch {epoch+1}/{num_epochs}")
     print(f"Train Loss: {train_loss/len(train_loader):.4f}")
     print(f"Val Loss:   {val_loss_mean:.4f}")
@@ -383,29 +400,6 @@ for epoch in range(num_epochs):
 
 os.makedirs(f"val_preds_{modelname}", exist_ok=True)
 
-with torch.no_grad():
-    for images, masks, names in val_loader:
-        images = images.to(device)
-        masks = masks.to(device)
-
-        outputs = model(images)["out"] if use_model_with_dict_output else model(images)
-        masks = masks.unsqueeze(1) if masks.ndim == 3 else masks
-
-        loss = criterion(outputs, masks)
-        val_loss += loss.item()
-
-        # Convert logits -> probabilities -> binary masks
-        preds = torch.sigmoid(outputs)
-        preds = (preds > 0.5).float()  # [B, 1, H, W]
-
-        for pred, name in zip(preds, names):
-            pred_np = pred.squeeze(0).cpu().numpy()  # [H, W]
-            pred_img = (pred_np * 255).astype(np.uint8)
-            pil_img = Image.fromarray(pred_img)
-
-            save_name = f"valid_{name}"
-            save_path = os.path.join(f"val_preds_{modelname}", save_name)
-            pil_img.save(save_path)
 
 # ==============================
 # Fine-tuning dataset (fine_path)
@@ -413,14 +407,17 @@ with torch.no_grad():
 ###relode best model before fine-tuning
 model.load_state_dict(torch.load(f"models/{modelname}"))
 
-fine_dataset = SkinDataset(fine_path)
-print(f"Fine dataset size (after skipping): {len(fine_dataset)}")
+full_fine_for_split = SkinDataset(fine_path, aug=None)
+n_fine = len(full_fine_for_split)
+fine_train_size = int(0.9 * n_fine)
 
-fine_train_size = int(0.9 * len(fine_dataset))
-fine_val_size = len(fine_dataset) - fine_train_size
-fine_train_dataset, fine_val_dataset = random_split(
-    fine_dataset, [fine_train_size, fine_val_size]
-)
+g_fine = torch.Generator().manual_seed(42)
+perm_fine = torch.randperm(n_fine, generator=g_fine).tolist()
+fine_train_idx = perm_fine[:fine_train_size]
+fine_val_idx = perm_fine[fine_train_size:]
+
+fine_train_dataset = Subset(SkinDataset(fine_path, aug=train_aug), fine_train_idx)
+fine_val_dataset = Subset(SkinDataset(fine_path, aug=val_aug), fine_val_idx)
 
 #fine_train_loader = DataLoader(fine_train_dataset, batch_size=24, shuffle=True)
 #fine_val_loader = DataLoader(fine_val_dataset, batch_size=24, shuffle=False)
@@ -446,7 +443,14 @@ fine_val_loader = DataLoader(
 print(f"Fine Train: {len(fine_train_dataset)}, Fine Val: {len(fine_val_dataset)}")
 
 optimizer = optim.Adam(model.parameters(), lr=5e-5)
-
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer,
+    mode="min",
+    factor=0.5,
+    patience=2,
+    min_lr=1e-6,
+    verbose=True
+)
 # Example: weight positives 3x higher than negatives
 # Estimate class imbalance on fine-tuning train set
 pos_pixels = 0.0
@@ -468,6 +472,14 @@ print(f"Estimated pos_weight for fine-tuning: {pos_weight_value:.3f}")
 pos_weight = torch.tensor([pos_weight_value], device=device)
 
 criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+
+dice_loss_fn = smp.losses.DiceLoss(mode="binary", from_logits=True)
+bce_loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)  # or without pos_weight in pretrain
+
+def combined_loss(logits, targets, alpha=0.5):
+    # alpha: weight for BCE term
+    return alpha * bce_loss_fn(logits, targets) + (1.0 - alpha) * dice_loss_fn(logits, targets)
+criterion = combined_loss
 
 fine_epochs = 30
 best_val_loss_fine = float("inf")
@@ -507,6 +519,7 @@ for epoch in range(fine_epochs):
             val_loss += loss.item()
 
     val_loss_mean = val_loss / len(fine_val_loader)
+    scheduler.step(val_loss_mean)
     print(f"\n[Fine] Epoch {epoch+1}/{fine_epochs}")
     print(f"[Fine] Train Loss: {train_loss/len(fine_train_loader):.4f}")
     print(f"[Fine] Val Loss:   {val_loss_mean:.4f}")
@@ -529,3 +542,52 @@ for epoch in range(fine_epochs):
         if epochs_no_improve_fine >= patience_fine:
             print(f"[Fine] Early stopping after {epoch+1} epochs.")
             break
+
+
+
+with torch.no_grad():
+    for images, masks, names in val_loader:
+        images = images.to(device)
+        masks = masks.to(device)
+
+        outputs = model(images)["out"] if use_model_with_dict_output else model(images)
+        masks = masks.unsqueeze(1) if masks.ndim == 3 else masks
+
+        loss = criterion(outputs, masks)
+        val_loss += loss.item()
+
+        # Convert logits -> probabilities -> binary masks
+        preds = torch.sigmoid(outputs)
+        preds = (preds > 0.5).float()  # [B, 1, H, W]
+
+        for pred, name in zip(preds, names):
+            pred_np = pred.squeeze(0).cpu().numpy()  # [H, W]
+            pred_img = (pred_np * 255).astype(np.uint8)
+            pil_img = Image.fromarray(pred_img)
+
+            save_name = f"valid_{name}"
+            save_path = os.path.join(f"val_preds_{modelname}", save_name)
+            pil_img.save(save_path)
+
+    for images, masks, names in train_loader:
+        images = images.to(device)
+        masks = masks.to(device)
+
+        outputs = model(images)["out"] if use_model_with_dict_output else model(images)
+        masks = masks.unsqueeze(1) if masks.ndim == 3 else masks
+
+        loss = criterion(outputs, masks)
+        val_loss += loss.item()
+
+        # Convert logits -> probabilities -> binary masks
+        preds = torch.sigmoid(outputs)
+        preds = (preds > 0.5).float()  # [B, 1, H, W]
+
+        for pred, name in zip(preds, names):
+            pred_np = pred.squeeze(0).cpu().numpy()  # [H, W]
+            pred_img = (pred_np * 255).astype(np.uint8)
+            pil_img = Image.fromarray(pred_img)
+
+            save_name = f"valid_{name}"
+            save_path = os.path.join(f"val_preds_{modelname}", save_name)
+            pil_img.save(save_path)
